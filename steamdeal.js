@@ -104,7 +104,7 @@ const CACHE_TTL = 15 * 60 * 1000;
 const THB_RATE = 33;
 const LIVE_API_BASE = (window.STEAMDEAL_API_BASE || '').replace(/\/$/, '');
 const LIVE_API = `${LIVE_API_BASE}/api/steam-deals`;
-const LIVE_PAGE_SIZE = 25;
+const LIVE_PAGE_SIZE = 50;
 
 let ALL_GAMES = [];
 let dataSource = 'fallback';
@@ -193,6 +193,7 @@ function currentLiveParams() {
     genre: (S.tab === 'sale' || S.tab === 'dlc') ? S.genre : '',
     search: S.search || '',
     discount: (S.tab === 'sale' || S.tab === 'dlc') ? S.disc : 0,
+    sort: S.sort || 'disc',
   };
 }
 
@@ -210,6 +211,7 @@ async function fetchLiveSteamPage(start = 0, params = currentLiveParams()) {
       genre: params.genre,
       search: params.search,
       discount: String(params.discount),
+      sort: params.sort || 'disc',
     });
     const res = await fetch(`${LIVE_API}?${qs}`, {
       signal: AbortSignal.timeout(12000),
@@ -321,7 +323,7 @@ async function fetchSteam(force = false) {
         LIVE_VIEW = cached.liveView || ALL_GAMES.filter(g => g._live && !g.free && !g.type);
         liveStart = cached.liveStart || ALL_GAMES.filter(g => g._live).length || 0;
         liveTotal = cached.liveTotal || liveStart;
-        liveKey = cached.liveKey || makeLiveKey({ mode: 'sale', genre: '', search: '', discount: 0 });
+        liveKey = cached.liveKey || makeLiveKey({ mode: 'sale', genre: '', search: '', discount: 0, sort: 'disc' });
         liveExhausted = false;
         liveAvailable = location.protocol !== 'file:';
         fetchedAt = new Date(cached.ts);
@@ -487,22 +489,47 @@ function showSkeletons() {
     </div></div>`).join('');
 }
 
+function loadWishStore() {
+  let data = [];
+  let ids = [];
+  try { data = JSON.parse(localStorage.getItem('wl_data') || '[]'); } catch {}
+  try { ids = JSON.parse(localStorage.getItem('wl') || '[]'); } catch {}
+  if (!Array.isArray(data)) data = [];
+  if (!Array.isArray(ids)) ids = [];
+  const map = new Map(data.filter(g => g && g.appid).map(g => [g.appid, g]));
+  const set = new Set([...map.keys(), ...ids]);
+  return { set, map };
+}
+const _wl = loadWishStore();
+
 const S = {
   tab: 'sale', disc: 0, genre: '', search: '', sort: 'disc',
-  wishlist: new Set(JSON.parse(localStorage.getItem('wl') || '[]')),
+  wishlist: _wl.set,
+  wishMap: _wl.map,
   filtered: [], page: 0, shown: 0, perPage: 24, loading: false, allLoaded: false,
 };
+
+function saveWishlist() {
+  localStorage.setItem('wl', JSON.stringify([...S.wishlist]));
+  localStorage.setItem('wl_data', JSON.stringify([...S.wishMap.values()]));
+}
 
 function updateStats() {
   const paid = ALL_GAMES.filter(g => !g.free && !g.type && g.sale > 0);
   const free = ALL_GAMES.filter(g => g.free);
   const dlc = ALL_GAMES.filter(g => g.type === 'dlc');
-  document.getElementById('stTotal').textContent = paid.length;
-  const discs = paid.map(x => x.disc).filter(x => x > 0);
+  // ในโหมด live ให้ stTotal แสดงยอดรวมจริงจาก Steam ไม่ใช่แค่ที่โหลดมา
+  const liveSaleMode = dataSource === 'live' && (S.tab === 'sale' || S.tab === 'dlc') && liveTotal > 0;
+  const totalCount = liveSaleMode ? liveTotal : paid.length;
+  document.getElementById('stTotal').textContent = totalCount.toLocaleString();
+  // คิดส่วนลดจากรายการที่กำลังแสดงอยู่จริง (LIVE_VIEW ในโหมด live)
+  const sample = (dataSource === 'live' && LIVE_VIEW.length) ? LIVE_VIEW.filter(g => !g.free) : paid;
+  const discs = sample.map(x => x.disc).filter(x => x > 0);
   document.getElementById('stMax').textContent = (discs.length ? Math.max(...discs) : 0) + '%';
   const avg = discs.length ? Math.round(discs.reduce((a, x) => a + x, 0) / discs.length) : 0;
   document.getElementById('stAvg').textContent = avg + '%';
-  document.getElementById('stFree').textContent = free.length;
+  const freeCount = (dataSource === 'live' && S.tab === 'free' && liveTotal > 0) ? liveTotal : free.length;
+  document.getElementById('stFree').textContent = freeCount.toLocaleString();
   const dlcEl = document.getElementById('stDlc');
   if (dlcEl) dlcEl.textContent = dlc.length;
 }
@@ -510,13 +537,19 @@ function updateStats() {
 function getPool() {
   if (isLiveMode()) return LIVE_VIEW;
   if (S.tab === 'free') return ALL_GAMES.filter(g => g.free);
-  if (S.tab === 'wish') return ALL_GAMES.filter(g => S.wishlist.has(g.appid));
+  if (S.tab === 'wish') {
+    const live = new Map(ALL_GAMES.map(g => [g.appid, g]));
+    return [...S.wishlist].map(id => live.get(id) || S.wishMap.get(id)).filter(Boolean);
+  }
   if (S.tab === 'dlc') return ALL_GAMES.filter(g => g.type === 'dlc');
   return ALL_GAMES.filter(g => !g.free && !g.type && g.sale > 0);
 }
 
 function buildFilteredList() {
   let list = getPool();
+
+  // โหมด live: กรอง+เรียงทำที่เซิร์ฟเวอร์แล้ว (Steam) คืนลำดับเดิมเพื่อให้ infinite scroll ต่อท้ายแบบเสถียร
+  if (isLiveMode()) return list;
 
   if (!isLiveMode() && (S.tab === 'sale' || S.tab === 'dlc')) {
     if (S.disc > 0) list = list.filter(g => g.disc >= S.disc);
@@ -598,12 +631,20 @@ function loadMore() {
       document.getElementById('lmi').style.display = 'none';
     }
     S.loading = false;
+    maybePrefetchLive();
   });
+}
+
+// ดึงหน้าถัดไปจาก Steam ล่วงหน้าเมื่อ buffer ใกล้หมด เพื่อให้เลื่อนได้ต่อเนื่องไม่สะดุด
+function maybePrefetchLive() {
+  if (isLiveMode() && !liveExhausted && !liveLoading && (S.filtered.length - S.shown) < S.perPage) {
+    loadMoreLive(false);
+  }
 }
 
 const observer = new IntersectionObserver(entries => {
   if (entries[0].isIntersecting) loadMore();
-}, { rootMargin: '400px' });
+}, { rootMargin: '1200px' });
 observer.observe(document.getElementById('sentinel'));
 
 function cardHTML(g) {
@@ -716,12 +757,15 @@ function toggleWish(e, id) {
   e.stopPropagation();
   if (S.wishlist.has(id)) {
     S.wishlist.delete(id);
+    S.wishMap.delete(id);
     showToast('ลบออกจาก Wishlist');
   } else {
     S.wishlist.add(id);
+    const g = ALL_GAMES.find(x => x.appid === id) || LIVE_VIEW.find(x => x.appid === id);
+    if (g) S.wishMap.set(id, g);
     showToast('เพิ่มใน Wishlist');
   }
-  localStorage.setItem('wl', JSON.stringify([...S.wishlist]));
+  saveWishlist();
   if (S.tab === 'wish') {
     render();
   } else {
@@ -790,7 +834,8 @@ document.querySelectorAll('.gt').forEach(b => {
 
 document.getElementById('sortSel').addEventListener('change', e => {
   S.sort = e.target.value;
-  render();
+  if (isLiveMode()) loadMoreLive(true);
+  else render();
 });
 
 document.getElementById('sbBudget').addEventListener('input', updateSidebarBudget);

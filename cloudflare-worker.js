@@ -11,6 +11,13 @@ const GENRE_TAGS = {
   Sports: 701,
 };
 const TAG_GENRES = Object.fromEntries(Object.entries(GENRE_TAGS).map(([name, id]) => [String(id), name]));
+const SORT_MAP = {
+  disc: '_ASC',
+  pasc: 'Price_ASC',
+  pdesc: 'Price_DESC',
+  name: 'Name_ASC',
+  rev: 'Reviews_DESC',
+};
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -98,7 +105,7 @@ function parseRows(html) {
 }
 
 async function fetchSteamDeals(params, env, ctx) {
-  const { start, count, mode, genre, search, discount } = params;
+  const { start, count, mode, genre, search, discount, sort } = params;
   const cacheUrl = new URL(`https://steamdeal.local/api/steam-deals?${new URLSearchParams(params)}`);
   const cache = caches.default;
   const hit = await cache.match(cacheUrl);
@@ -110,8 +117,10 @@ async function fetchSteamDeals(params, env, ctx) {
   api.searchParams.set('start', String(start));
   api.searchParams.set('count', String(count));
   api.searchParams.set('dynamic_data', '');
-  api.searchParams.set('sort_by', '_ASC');
+  api.searchParams.set('sort_by', SORT_MAP[sort] || '_ASC');
   if (mode === 'free') {
+    // เฉพาะเกมที่ "แจกฟรีชั่วคราว" (ลด 100% จากราคาเต็ม) ไม่เอาเกม free-to-play ถาวร
+    api.searchParams.set('specials', '1');
     api.searchParams.set('maxprice', 'free');
     api.searchParams.set('category1', '998');
   } else if (mode === 'dlc') {
@@ -140,7 +149,9 @@ async function fetchSteamDeals(params, env, ctx) {
   const data = await response.json();
   const rawCount = (data.results_html || '').match(/<a\b(?=[^>]*search_result_row)[\s\S]*?<\/a>/g)?.length || 0;
   const games = parseRows(data.results_html || '')
-    .filter(game => !discount || game.disc >= discount);
+    .filter(game => mode === 'free'
+      ? game.free
+      : !game.free && (!discount || game.disc >= discount));
   const out = json({
     start,
     count,
@@ -148,6 +159,7 @@ async function fetchSteamDeals(params, env, ctx) {
     genre,
     search,
     discount,
+    sort,
     total: Number(data.total_count || 0),
     rawCount,
     games,
@@ -176,6 +188,7 @@ export default {
       genre: url.searchParams.get('genre') || '',
       search: url.searchParams.get('search') || '',
       discount: Math.max(0, Number(url.searchParams.get('discount') || 0)),
+      sort: url.searchParams.get('sort') || 'disc',
     }, env, ctx);
   },
 };
