@@ -12,7 +12,7 @@ const PROXIES = [
   u => `https://thingproxy.freeboard.io/fetch/${u}`,
 ];
 
-const BUILD = 'v12-2026-06-13';
+const BUILD = 'v13-2026-06-14';
 console.log('SteamDeal ' + BUILD);
 const CACHE_KEY = 'steamdeal_v8';
 
@@ -569,15 +569,22 @@ function loadMore() {
 }
 
 function maybePrefetchLive() {
-  if (isLiveMode() && !liveExhausted && !liveLoading && (S.filtered.length - S.shown) < S.perPage) {
-    loadMoreLive(false);
-  }
+  if (S.loading || liveLoading || S.allLoaded) return;
+  const s = document.getElementById('sentinel');
+  if (s && s.getBoundingClientRect().top <= window.innerHeight + 1200) loadMore();
 }
 
 const observer = new IntersectionObserver(entries => {
   if (entries[0].isIntersecting) loadMore();
 }, { rootMargin: '1200px' });
 observer.observe(document.getElementById('sentinel'));
+
+let prefetchTick = false;
+window.addEventListener('scroll', () => {
+  if (prefetchTick) return;
+  prefetchTick = true;
+  requestAnimationFrame(() => { prefetchTick = false; maybePrefetchLive(); });
+}, { passive: true });
 
 function cardHTML(g) {
   const inW = S.wishlist.has(g.appid);
